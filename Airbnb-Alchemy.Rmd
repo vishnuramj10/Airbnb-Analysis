@@ -1,0 +1,663 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_notebook: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(randomForest)
+library(jsonlite)
+library(tidytext)
+library(lubridate)
+library(ggplot2)
+library(curl)
+library(RCurl)
+library(urltools)
+library(httr)
+library(rvest)
+library(dplyr)
+library(textutils)
+library(stringr)
+library(tm)
+library(tidyr)
+library(broom)
+library(purrr)
+library(modelr)
+library(ggbeeswarm)
+library(magrittr)
+library(rsample)
+```
+
+## Web Scrapping
+```{r}
+#To get WebAPI
+#Create an account on https://www.scrapingbee.com/ and get the API key. Its a very simple process. The Key has only 1000 credits so we had to use all of the teammates account to retrieve the web details.
+```
+
+```{r}
+# URL parsing to make a call to scrapingbee
+
+my_url <- 'https://app.scrapingbee.com/api/v1'
+my_api_key <- 'HM09LWHYYM3R66P93XAJBRRFTJXPKQ3GZ9HHMERD80RE7AFB4N4ZWD9A62RUC4R1FNTBEQZ2S00Q5ZQN'
+my_custom_google <- TRUE
+```
+
+```{r}
+states <- c("Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut","Delaware","District-of-Columbia","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa","Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan","Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New-Hampshire","New-Jersey","New-Mexico","New-York","North-Carolina","North-Dakota","Ohio","Oklahoma","Oregon","Pennsylvania","Rhode-Island","South-Carolina","South-Dakota","Tennessee","Texas","Utah","Vermont","Virginia","Washington","West-Virginia","Wisconsin","Wyoming")
+```
+
+```{r}
+length(states)
+```
+
+```{r}
+# additional URL needs to be passed to scrapingbee API call so that it gets the required page
+
+final_url <- 'https://www.airbnb.com/s/{state}--United-States/homes?tab_id=home_tab&refinement_paths%5B%5D=%2Fhomes&flexible_trip_lengths%5B%5D=one_week&price_filter_input_type=0&price_filter_num_nights=5&channel=EXPLORE&search_type=category_change&date_picker_type=calendar&source=structured_search_input_header&query=New%20Jersey%2C%20United%20States&place_id=ChIJn0AAnpX7wIkRjW0_-Ad70iw&category_tag=Tag%3A8661&search_mode=flex_destinations_search&items_offset={page_no}'
+```
+
+```{r}
+scrape_airbnb <- function(my_api_key, state_url) {
+  api_base_url <- "https://app.scrapingbee.com/api/v1/"
+  api_response <- getForm(
+   uri = api_base_url,
+  .params = c(
+    api_key = my_api_key,
+    url = state_url
+   )
+  )
+  return(api_response)
+}
+```
+
+```{r}
+result_df <- data.frame(place_name = character(),
+                         description = character(),
+                         state = character(),
+                         views = numeric(),
+                         from_date = as.Date(character()),
+                         to_date = as.Date(character()),
+                         price = numeric(),
+                         original_price = numeric(),
+                         price_str = character(),
+                         rating = numeric(),
+                         no_of_rates = numeric())
+
+```
+
+```{r}
+extractDate <- function(date){
+  date_list<-list()
+  year <-format(Sys.Date(), "%Y")
+  month1 <- word(date,1)
+  month2 <- ifelse(is.na(as.numeric(word(date,4))),word(date,4),month1 )
+  ddate <- stringr::str_extract_all(date, "\\d+")
+  ddate <- strsplit(ddate[[1]]," ")
+  #ddate<-sapply(strsplit(date, " - "), "[[", 1)
+  if(nchar(ddate[[1]])==1)
+    ddate[[1]]<-paste("0",ddate[[1]],sep='')
+  if(nchar(ddate[[2]])==1)
+    ddate[[2]]<-paste("0",ddate[[2]],sep='')
+  Date_1<-as.Date(paste(month1,ddate[[1]],year,sep = ''),"%B%d%Y")
+  Date_2<-as.Date(paste(month2,ddate[[2]],year,sep = ''),"%B%d%Y")
+  date_list[[1]]<-Date_1
+  date_list[[2]]<-Date_2
+  return(date_list)
+ #Date_1<-as.Date(with(df1,paste(Year,Month,Day,sep="-")),"%Y-%m-%d")
+}
+```
+
+
+```{r}
+retrieve_airbnb_details <- function(attributes_extracted, state){
+    for (i in seq_along(attributes_extracted)) {
+      item <- attributes_extracted[[i]]
+      place_name <- item[1]
+      description <- item[2]
+      view <- as.numeric(str_extract(item[3], "\\d+"))
+      date<-extractDate(item[4])
+      from_date <- date[[1]]
+      to_date <- date[[2]]
+      price_str <- item[5]
+      price <- as.numeric(str_extract(str_extract(price_str, "\\$\\d+\\s*per night"), "\\d+"))
+      if (!is.na(price)){
+        if (str_detect(price_str, "originally")){
+          original_price <- as.numeric(str_extract(price_str, "(?<=originally \\$)\\d+"))
+        } else{
+          original_price <- price
+        }
+      } else{
+         original_price <- NA
+      }
+      
+      rating <- as.numeric(str_extract(item[6], "\\d+\\.\\d"))
+      no_of_rates <- as.numeric(str_extract(item[6], "(?<=\\()\\d+(?=\\))"))
+      result_df <- rbind(result_df, data.frame(place_name, description, state, view, from_date, to_date, price, original_price, price_str, rating, no_of_rates))
+    }
+    return(result_df)
+}
+```
+
+
+```{r}
+#for (state in states) {
+#  state_url <- gsub("\\{state\\}", state, final_url)
+#  print(state)
+#  added_places <- list()
+#  attributes_extracted_all <- list()
+#  for (offset in seq(0, 90, by = 18)){
+#      offset_url <- gsub("\\{page_no\\}", offset, state_url)
+#      offset_response <- scrape_airbnb(my_api_key, offset_url)
+#      elements_extracted <- read_html(offset_response) %>%
+#                            html_elements(".g1qv1ctd.cb4nyux.dir.dir-ltr") %>%
+#                           html_text2()
+#      attributes_extracted <- strsplit(elements_extracted, "\n")
+#      i <- 1
+#      while (i < length(attributes_extracted)) {
+#        place_name <- attributes_extracted[[i]][1]
+#        if (place_name %in% added_places) {
+#          attributes_extracted <- attributes_extracted[-i]
+#        } else {
+#          added_places <- c(added_places, place_name)
+#        i <- i + 1
+#        }
+#      }
+#      attributes_extracted_all <- c(attributes_extracted_all, attributes_extracted)
+#  }
+#  result_df <- retrieve_airbnb_details(attributes_extracted_all, state)
+#}
+```
+
+```{r}
+df_airbnb_data <- read.csv('airbnb_data_scrapped_final.csv')
+df_airbnb_data <- subset(df_airbnb_data, select = -c(from_date_1, to_date_1))
+```
+
+```{r}
+head(df_airbnb_data)
+```
+
+## 1.0 EDA
+
+```{r}
+df_airbnb_data_2 <- df_airbnb_data
+```
+
+```{r}
+df_airbnb_data_2$binned_season <- cut(month(as.Date(df_airbnb_data$to_date, "%m/%d/%y")) + 1, seq(1, 13, 3), labels = c("Winter", "Spring", "Summer", "Fall"), include.lowest = TRUE)
+head(df_airbnb_data_2)
+```
+
+
+```{r}
+df_airbnb_data_2 %>% filter(state == 'Alaska') %>% summarise(num_listings = n(),
+              lowest_view = min(view),
+              highest_view = max(view),
+              view_range = highest_view - lowest_view)
+```
+
+```{r}
+df_airbnb_data_2 %>% filter(state == 'Minnesota') %>% summarise(num_listings = n(),
+              lowest_view = min(view),
+              highest_view = max(view),
+              view_range = highest_view - lowest_view)
+```
+
+```{r}
+for (season in c("Spring", "Summer", "Fall", "Winter")) {
+  df_airbnb_data_2 %>%
+    filter(df_airbnb_data_2$binned_season == season) %>%
+    ggplot(., aes(x = state, y = view)) +
+      geom_boxplot(color="purple", fill="yellow", alpha=0.2) +
+      coord_cartesian(ylim=c(100, 400)) +
+      xlab("State") +
+      ylab("View") +
+      ggtitle(paste0("Box Plot of views for listings in all states for the season of ", season)) +
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) -> g
+    print(g)
+}
+```
+
+```{r}
+for (season in c("Spring", "Summer", "Fall", "Winter")) {
+  df_airbnb_data_2 %>%
+    filter(df_airbnb_data_2$binned_season == season) %>%
+    ggplot(., aes(x = state, y = price)) +
+      geom_boxplot(color="blue", fill="yellow", alpha=0.2) +
+      coord_cartesian(ylim=c(50, 500)) +
+      xlab("State") +
+      ylab("Price") +
+      ggtitle(paste0("Box Plot of prices for listings in all states for the season of ", season)) +
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) -> g
+    print(g)
+}
+
+```
+
+```{r}
+for (season in c("Spring", "Summer", "Fall", "Winter")) {
+  df_airbnb_data_2 %>%
+    filter(df_airbnb_data_2$binned_season == season) %>%
+    ggplot(., aes(x = state, y = rating)) +
+      geom_boxplot(color="red", fill="green", alpha=0.2) +
+      xlab("State") +
+      ylab("Rating") +
+      ggtitle(paste0("Box Plot of ratings for listings in all states for the season of ", season)) +
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) -> g
+    print(g)
+}
+
+```
+
+```{r}
+ggplot(df_airbnb_data_2, aes(x = original_price, y = view, color = rating)) +
+  geom_point(size = 3) +
+  scale_color_gradient(low = "red", high = "green") +
+  xlab("Original Price") +
+  ylab("Views") +
+  ggtitle("Scatterplot of Original Price vs. Views, Colored by Rating")
+```
+
+```{r}
+eastern_states <- c("Maine", "New-Hampshire", "Vermont", "Massachusetts", "Rhode-Island", "Connecticut", "New-York", "New-Jersey", "Pennsylvania", "Maryland", "Delaware", "Virginia", "West-Virginia", "North Carolina", "South Carolina", "Georgia", "Florida")
+
+df_eastern <- df_airbnb_data_2 %>% 
+  filter(state %in% eastern_states)
+
+ggplot(df_eastern, aes(x = state, y = price)) +
+  geom_boxplot(color="red", fill="orange", alpha=0.2) +
+  coord_cartesian(ylim=c(50, 500)) +
+  xlab("State") +
+  ylab("Price") +
+  ggtitle("Box Plot of Airbnb Prices for Eastern States") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r}
+western_states <- c("Alaska", "Arizona", "California", "Colorado", "Hawaii", "Idaho", 
+                    "Montana", "Nevada", "New Mexico", "Oregon", "Utah", "Washington", "Wyoming")
+
+df_western <- df_airbnb_data_2 %>% 
+  filter(state %in% western_states)
+
+ggplot(df_eastern, aes(x = state, y = price)) +
+  geom_boxplot(color="blue", fill="green", alpha=0.2) +
+  coord_cartesian(ylim=c(40, 500)) +
+  xlab("State") +
+  ylab("Price") +
+  ggtitle("Box Plot of Airbnb Prices for Western States") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r}
+df_prices <- df_airbnb_data_2 %>%
+  group_by(state) %>%
+  summarise(mean_original_price = mean(original_price),
+            mean_price = mean(price)) %>%
+  ungroup()
+```
+
+```{r}
+ggplot(df_prices, aes(x = state)) +
+  geom_bar(aes(y = mean_original_price, fill = "Original Price"), stat = "identity", position = "dodge") +
+  geom_bar(aes(y = mean_price, fill = "Price"), stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("Original Price" = "blue", "Price" = "red")) +
+  xlab("") +
+  ylab("Mean Price") +
+  ggtitle("Comparison of Mean Original Price and Mean Price by State") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r}
+ggplot(df_airbnb_data_2, aes(x = no_of_rates, y = rating, color = state)) +
+  geom_point() +
+  xlab("Number of Ratings") +
+  ylab("Rating") +
+  ggtitle("Relationship between Ratings and Number of Ratings")
+```
+
+## 2.0 Sentiment Analysis on Description
+```{r}
+tidy_desc <- df_airbnb_data %>%
+  select(description) %>%
+  unnest_tokens(word, description) %>%
+  anti_join(stop_words) %>%
+  mutate(word = str_replace_all(word, "[^[:alpha:]\\s']", ""))
+
+# Calculate the frequency of each word and select the top 20
+top_words <- tidy_desc %>%
+  count(word, sort = TRUE) %>%
+  top_n(20)
+```
+
+```{r}
+ggplot(top_words, aes(x = reorder(word, n), y = n)) +
+  geom_col(fill = "steelblue") +
+  labs(x = NULL, y = "Frequency") +
+  coord_flip() +
+  ggtitle("Most Common Words") +
+  theme_minimal()
+```
+
+```{r}
+bigrams <- df_airbnb_data %>%
+  unnest_tokens(bigram, description, token = "ngrams", n = 2)
+```
+
+```{r}
+library(tidyverse)
+bigrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word) %>%
+  unite(bigram, word1, word2, sep=" ") %>%
+  count(bigram, sort = TRUE) %>%
+  filter(n > 20 ) %>%
+  top_n(20) %>%
+  mutate(bigram = reorder(bigram, n)) %>%
+  ggplot(aes(bigram, n)) +
+  geom_bar(stat="identity") +
+  geom_col(fill = "black") +
+  ggtitle("Most Common Bigrams") +
+  xlab(NULL) + coord_flip()
+```
+
+```{r}
+df_states <- df_airbnb_data %>% 
+  filter(state %in% c("New-York", "California", "Florida", "Hawaii"))
+head(df_states)
+```
+
+```{r}
+ny_ca_words <- df_states %>%
+  select(state, description) %>%
+  unnest_tokens(word, description) %>%
+  anti_join(stop_words) %>%
+  mutate(word = str_replace_all(word, "[^[:alpha:]\\s']", "")) %>%
+  filter(!word %in% stop_words$word) %>%
+  count(state, word) %>%
+  group_by(state) %>%
+  mutate(proportion = n / sum(n)) %>%
+  select(-n) %>%
+  pivot_wider(names_from = "state", values_from = "proportion")
+```
+
+```{r}
+ggplot(ny_ca_words, aes(x = `New-York`,
+y = `California`)) +
+geom_abline(color = "red", lty = 2,
+lwd=2) +
+geom_point(color="grey")+
+geom_text(aes(label = word),
+check_overlap = TRUE) +
+scale_x_log10() +
+scale_y_log10()
+```
+
+```{r}
+fl_hw_words <- df_states %>%
+  select(state, description) %>%
+  unnest_tokens(word, description) %>%
+  anti_join(stop_words) %>%
+  mutate(word = str_replace_all(word, "[^[:alpha:]\\s']", "")) %>%
+  filter(!word %in% stop_words$word) %>%
+  count(state, word) %>%
+  group_by(state) %>%
+  mutate(proportion = n / sum(n)) %>%
+  select(-n) %>%
+  pivot_wider(names_from = "state", values_from = "proportion")
+```
+
+```{r}
+ggplot(fl_hw_words, aes(x = `Florida`,
+y = `Hawaii`)) +
+geom_abline(color = "red", lty = 2,
+lwd=2) +
+geom_point(color="grey")+
+geom_text(aes(label = word),
+check_overlap = TRUE) +
+ggtitle("Proportion of keywords used by Florida vs Hawaii") +
+scale_x_log10() +
+scale_y_log10()
+```
+
+```{r}
+text_corpus <- Corpus(VectorSource(df_airbnb_data$description))
+# Perform text preprocessing
+text_corpus <- tm_map(text_corpus, removeNumbers) # Remove numbers
+text_corpus <- tm_map(text_corpus, content_transformer(tolower)) # Convert to lowercase
+text_corpus <- tm_map(text_corpus, removePunctuation) # Remove punctuation marks
+text_corpus <- tm_map(text_corpus, removeWords, stopwords()) # Remove stop words
+text_corpus <- tm_map(text_corpus, stemDocument) # Perform stemming
+text_corpus <- tm_map(text_corpus, stripWhitespace) 
+```
+
+```{r}
+dtm <- DocumentTermMatrix(text_corpus)
+df_dtm <- as.data.frame(as.matrix(dtm))
+```
+
+```{r}
+df_dtm %>%
+  rownames_to_column(var = "document") %>%
+  pivot_longer(cols = -document, names_to = "term", values_to = "count") %>%
+  filter(count > 0) %>%
+  inner_join(get_sentiments("nrc"), by = c("term" = "word")) %>%
+  group_by(sentiment) %>%
+  summarise(total_count = sum(count)) %>%
+  ggplot(aes(x = sentiment, y = total_count, fill = sentiment)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Sentiment Analysis",
+       x = "Sentiment")
+
+```
+
+```{r}
+# Get the sentiment score
+df_sentiments <- df_airbnb_data %>%
+  select(description, state) %>%
+  mutate(id = row_number()) %>%
+  unnest_tokens(word, description) %>%
+  left_join(get_sentiments("nrc"), by = "word") %>%
+  group_by(id, state) %>%
+  summarise(sentiment_score = sum(ifelse(sentiment %in% c("positive", "surprise", "joy", "trust", "anticipation"), 1, 
+                                           ifelse(sentiment %in% c("negative", "sadness", "disgust", "anger", "fear"), -1, 0)))) %>%
+  select(-state)
+```
+
+
+```{r}
+df_airbnb_data <- df_airbnb_data %>%
+  mutate(id = row_number()) %>%
+  left_join(df_sentiments, by = "id") %>%
+  select(-id)
+```
+
+```{r}
+df_airbnb_data %>% ggplot(aes(y = original_price, x = sentiment_score, color = state)) +
+  geom_point() +  
+  theme(legend.position = "none") +
+  labs(title = "Sentiment Score vs Price",
+       x = "Price")
+```
+
+## 3.0 Ml Modeling for Predicting Price
+```{r}
+df_airbnb_data_2 <- df_airbnb_data
+df_airbnb_data_2$state_encoded <- as.numeric(factor(df_airbnb_data_2$state))
+df_airbnb_data_2 <- na.omit(df_airbnb_data_2)
+```
+
+```{r}
+train_index <- sample(1:nrow(df_airbnb_data_2), 0.7*nrow(df_airbnb_data_2))
+train_data <- df_airbnb_data_2[train_index, ]
+test_data <- df_airbnb_data_2[-train_index, ]
+```
+
+### Fitting Linear Regression
+```{r}
+lm_model <- lm(original_price ~ state_encoded + view + rating + no_of_rates + sentiment_score, data = train_data)
+lm_pred <- predict(lm_model, newdata = test_data)
+sqrt(mean((lm_pred - test_data$original_price)^2))
+```
+
+### Fitting Random Forest Regressor
+```{r}
+rf_model <- randomForest(original_price ~ state_encoded + view + rating + no_of_rates + sentiment_score, data = train_data, ntree = 500, importance = TRUE)
+```
+
+```{r}
+rf_pred <- predict(rf_model, newdata = test_data)
+sqrt(mean((rf_pred - test_data$original_price)^2))
+```
+
+
+## Doing for each state using ModelR
+```{r}
+model_lm <- function(df) {
+  lm(original_price ~ view + rating + no_of_rates + sentiment_score, data = df)
+}
+```
+
+```{r}
+airbnb_data_nested <- df_airbnb_data_2 %>% 
+  group_by(state) %>% 
+  nest()
+```
+
+```{r}
+airbnb_data_nested_models <- airbnb_data_nested %>% 
+  mutate(model = map(data, model_lm)) %>% 
+  mutate(lm_glance = map(model, augment))  %>%
+  mutate(resid = map2(data, model, add_residuals))
+```
+
+```{r}
+resid <- unnest(airbnb_data_nested_models, resid)
+resid %>% ggplot(aes(sentiment_score, resid)) +
+                  geom_line(alpha = 1/3, aes(group=state)) +
+                  geom_smooth(color = "red") + ggtitle("State wise residuals vs Sentiment Scores") + theme(plot.title = element_text(size=10, hjust = 0.5))
+```
+
+```{r}
+# create a boxplot of residuals by state
+boxplot(resid$original_price ~ resid$state,
+        xlab = "State",
+        ylab = "Residuals",
+        main = "Residuals by State")
+```
+
+# TFIDF Extraction
+
+## Extract TFIDF for each word in description to add it dataframe
+```{r}
+tdm <- TermDocumentMatrix(text_corpus)
+tfidf <- weightTfIdf(tdm)
+df_tfidf <- as.data.frame(as.matrix(tfidf))
+df_tfidf_t <- data.frame(t(df_tfidf))
+df_tfidf_t_filtered <- df_tfidf_t[, colSums(df_tfidf_t != 0) > 0]
+```
+
+
+```{r}
+library(wordcloud)
+library(RColorBrewer)
+
+# Calculate the sum of TF-IDF scores for each word
+word_freq <- colSums(df_tfidf_t)
+
+# Sort the words based on their frequency
+word_freq <- sort(word_freq, decreasing = TRUE)
+
+# Create a word cloud using the top 100 words
+wordcloud(names(word_freq)[1:75], word_freq[1:75], colors = brewer.pal(8, "Dark2"))
+```
+
+
+```{r}
+# PCA
+pca <- prcomp(df_tfidf_t, center = TRUE, scale. = TRUE)
+
+# Extract the first 10 principal components
+pc_scores <- data.frame(pca$x[, 1:10])
+```
+
+```{r}
+df_airbnb_data_tfidf <- df_airbnb_data %>%
+  select(-description) %>%
+  bind_cols(pc_scores)
+```
+
+```{r}
+df_airbnb_data_3 <- df_airbnb_data_tfidf %>%
+  select(-place_name, -from_date, -to_date, -price, -price_str)
+df_airbnb_data_3 <- na.omit(df_airbnb_data_3)
+```
+
+```{r}
+model_lm <- function(df) {
+  lm(original_price ~ ., data = df)
+}
+```
+
+```{r}
+airbnb_data_nested <- df_airbnb_data_3 %>% 
+  group_by(state) %>% 
+  nest()
+```
+
+```{r}
+airbnb_data_nested_models <- airbnb_data_nested %>% 
+  mutate(model = map(data, model_lm)) %>% 
+  mutate(lm_glance = map(model, augment))  %>%
+  mutate(resid = map2(data, model, add_residuals))
+```
+
+```{r}
+resid <- unnest(airbnb_data_nested_models, resid)
+```
+
+```{r}
+# create a boxplot of residuals by state
+boxplot(resid$original_price ~ resid$state,
+        xlab = "State",
+        ylab = "Residuals",
+        main = "Residuals by State")
+```
+
+```{r}
+df_airbnb_data_3$state <- as.numeric(factor(df_airbnb_data_3$state))
+```
+
+```{r}
+train_index <- sample(1:nrow(df_airbnb_data_3), 0.7*nrow(df_airbnb_data_3))
+train_data <- df_airbnb_data_3[train_index, ]
+test_data <- df_airbnb_data_3[-train_index, ]
+```
+
+### Fitting Linear Model
+```{r}
+lm_model <- lm(rating ~ ., data = train_data)
+lm_pred <- predict(lm_model, newdata = test_data)
+```
+
+```{r}
+sqrt(mean((lm_pred - test_data$original_price)^2))
+```
+
+### Fitting Random Forest Regressor
+```{r}
+rf_model <- randomForest(original_price ~ ., data = train_data, ntree = 500, importance = TRUE)
+```
+
+```{r}
+rf_pred <- predict(rf_model, newdata = test_data)
+sqrt(mean((rf_pred - test_data$original_price)^2))
+```
+
